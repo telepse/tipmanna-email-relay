@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.env
+*.log
+id_tipmanna_email_relay
+id_tipmanna_email_relay.pub
