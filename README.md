@@ -61,7 +61,7 @@ Copy `.env.example` to `.env` for local development.
 | `QSERVER_SMTP_PASSWORD` | yes | Qserver mailbox password |
 | `QSERVER_FROM_EMAIL` | yes | From address, e.g. `hello@tipmanna.com` |
 | `ADMIN_NOTIFICATION_EMAIL` | yes | Team inbox that receives alerts |
-| `PORT` | no | HTTP port (default `8080`; Railway sets this automatically) |
+| `PORT` | no | HTTP port (default `8080`) |
 
 SMTP credentials must come exclusively from environment variables and must never be hard-coded.
 
@@ -84,70 +84,116 @@ curl -X POST "http://localhost:8080/admin-notifications" \
   -d '{"type":"smoke","subject":"Relay smoke","message":"Test"}'
 ```
 
-## Deploy to Railway
+## Deploy to Oracle Cloud VM (recommended)
 
-This service must run on a host that can reach Qserver SMTP (`26.qservers.net:465`). Railway is suitable because it is off Render and can reach external SMTP.
+Railway and similar PaaS hosts often **block outbound SMTP**, producing `[admin-notifications] SMTP send failed: Connection timeout`. Use a VPS where port 465 to Qserver is reachable.
 
-### 1. Create the Railway project
+### 1. Provision the VM
 
-1. Push this repo to GitHub (or connect an existing repo).
-2. In [Railway](https://railway.app/), click **New Project** → **Deploy from GitHub repo**.
-3. Select the TipManna repository.
-4. Open the new service **Settings** → **Root Directory** and set it to `email-relay`.
-5. Railway detects Node.js and runs:
-   - **Build:** `npm install && npm run build`
-   - **Start:** `npm start`
+1. Create an Oracle Cloud **Always Free** (or paid) VM instance (Ubuntu 22.04+).
+2. Open ingress: **443** (HTTPS, if using nginx + TLS) and/or **8080** (direct, dev only).
+3. Ensure **egress** to `26.qservers.net:465` is allowed (default on most VPS).
 
-Alternatively, deploy only the `email-relay` folder as its own repository.
-
-### 2. Configure environment variables
-
-In Railway → **Variables**, add:
-
-| Variable | Value |
-|----------|-------|
-| `RELAY_API_KEY` | Generate a long random secret |
-| `QSERVER_SMTP_HOST` | `26.qservers.net` |
-| `QSERVER_SMTP_PORT` | `465` |
-| `QSERVER_SMTP_USER` | Your Qserver SMTP username |
-| `QSERVER_SMTP_PASSWORD` | Your Qserver SMTP password |
-| `QSERVER_FROM_EMAIL` | `hello@tipmanna.com` |
-| `ADMIN_NOTIFICATION_EMAIL` | Team inbox address |
-
-Do **not** commit secrets. Railway injects them at runtime.
-
-### 3. Generate a public URL
-
-1. Open **Settings** → **Networking** → **Generate Domain**.
-2. Copy the HTTPS URL, e.g. `https://tipmanna-email-relay-production.up.railway.app`.
-
-### 4. Verify deployment
+### 2. Install Node.js on the VM
 
 ```bash
-curl "https://YOUR-RAILWAY-DOMAIN/health"
+sudo apt update && sudo apt install -y git curl
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
+```
+
+### 3. Deploy the relay
+
+```bash
+git clone <your-repo-url> tipmanna
+cd tipmanna/email-relay
+npm ci
+npm run build
+cp .env.example .env
+# edit .env with QSERVER_* and RELAY_API_KEY
+```
+
+### 4. Run with systemd
+
+Create `/etc/systemd/system/tipmanna-email-relay.service`:
+
+```ini
+[Unit]
+Description=TipManna admin email relay
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/tipmanna/email-relay
+EnvironmentFile=/home/ubuntu/tipmanna/email-relay/.env
+ExecStart=/usr/bin/node dist/index.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
 ```
 
 ```bash
-curl -X POST "https://YOUR-RAILWAY-DOMAIN/admin-notifications" \
+sudo systemctl daemon-reload
+sudo systemctl enable --now tipmanna-email-relay
+sudo systemctl status tipmanna-email-relay
+```
+
+### 5. TLS reverse proxy (production)
+
+Put nginx + Let's Encrypt in front of port 8080 so TipManna calls `https://relay.yourdomain.com`.
+
+Example nginx site:
+
+```nginx
+server {
+  listen 443 ssl;
+  server_name relay.yourdomain.com;
+  ssl_certificate     /etc/letsencrypt/live/relay.yourdomain.com/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/relay.yourdomain.com/privkey.pem;
+
+  location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+  }
+}
+```
+
+### 6. Verify on the VM
+
+```bash
+curl "http://127.0.0.1:8080/health"
+```
+
+From your laptop (after TLS):
+
+```bash
+curl "https://relay.yourdomain.com/health"
+curl -X POST "https://relay.yourdomain.com/admin-notifications" \
   -H "Authorization: Bearer $RELAY_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"type":"smoke","subject":"Relay smoke","message":"Test"}'
 ```
 
-Confirm delivery to the admin mailbox before wiring TipManna production.
+Confirm delivery to the admin mailbox.
 
-### 5. Wire TipManna backend (Render)
-
-On the TipManna backend only (not this relay):
+### 7. Wire TipManna backend (Render)
 
 | Variable | Value |
 |----------|-------|
-| `EMAIL_RELAY_URL` | Railway HTTPS base URL (no trailing slash) |
+| `EMAIL_RELAY_URL` | `https://relay.yourdomain.com` (no trailing slash) |
 | `EMAIL_RELAY_API_KEY` | Same value as relay `RELAY_API_KEY` |
 
 Do **not** set `QSERVER_*` on Render. User/host mail continues to use Resend unchanged.
 
 See also: [docs/ops/admin-email-relay.md](../docs/ops/admin-email-relay.md).
+
+## Why not Railway?
+
+Railway was tested but outbound SMTP to Qserver timed out (`Connection timeout`). That is expected on many managed platforms. The relay must run on infrastructure with working SMTP egress — Oracle VM is the current target.
 
 ## Scripts
 

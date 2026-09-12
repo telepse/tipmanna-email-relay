@@ -1,3 +1,5 @@
+import "dotenv/config";
+
 export type RelayConfig = {
   port: number;
   relayApiKey: string;
